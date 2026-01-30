@@ -1,0 +1,830 @@
+---
+title: "Local Projections"
+subtitle: "Flexible Impulse Response Estimation"
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  fig.width = 10, fig.height = 6, fig.align = "center"
+)
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(fixest)
+library(MASS)
+library(sandwich)
+
+theme_set(theme_minimal(base_size = 13))
+set.seed(42)
+```
+
+# The Local Projections Idea {.unnumbered}
+
+Local Projections (LP), introduced by @jorda2005, provide a flexible alternative to Vector Autoregressions for estimating impulse response functions. The key insight: instead of specifying and iterating a full dynamic system, directly regress the outcome $h$ periods ahead on today's shock.
+
+## From VAR to LP
+
+### The VAR Approach
+
+A VAR(p) models the joint dynamics of a vector $\mathbf{y}_t$:
+
+$$
+\mathbf{y}_t = \mathbf{c} + \mathbf{A}_1 \mathbf{y}_{t-1} + \cdots + \mathbf{A}_p \mathbf{y}_{t-p} + \mathbf{u}_t
+$$
+
+To get impulse responses, we:
+1. Identify structural shocks (Cholesky, sign restrictions, etc.)
+2. Iterate the system forward to compute $\frac{\partial \mathbf{y}_{t+h}}{\partial \varepsilon_t}$
+
+This requires **correct specification of the entire system**.
+
+### The LP Approach
+
+LP estimates the response at each horizon $h$ directly:
+
+$$
+y_{t+h} = \alpha^h + \beta^h \cdot \text{shock}_t + \mathbf{X}_t' \boldsymbol{\gamma}^h + \varepsilon_{t+h}
+$$
+
+where:
+- $\beta^h$ is the impulse response at horizon $h$
+- $\mathbf{X}_t$ contains controls (lags of $y$, other variables)
+- Each horizon is a **separate regression**
+
+::: {.callout-tip}
+## Key Insight
+LP doesn't require specifying the full dynamic system. We only need to identify the shock of interest—the rest of the economy can be a "black box."
+:::
+
+## When LP and VAR Give the Same Answer
+
+**Theorem (Plagborg-Møller & Wolf, 2021):** Under correct specification, LP and VAR estimate the same population impulse responses.
+
+Both methods are consistent for:
+$$
+\text{IRF}(h) = \frac{\partial \mathbb{E}[y_{t+h} | \mathcal{I}_t]}{\partial \text{shock}_t}
+$$
+
+The difference is in **finite samples** and **misspecification**:
+
+| Aspect | VAR | LP |
+|--------|-----|-----|
+| Specification | Imposes structure | Agnostic at each horizon |
+| Efficiency | More efficient if correct | Less efficient (more parameters) |
+| Misspecification | Biased if wrong | Robust |
+| Confidence intervals | Tighter | Wider (but honest) |
+
+## When They Diverge
+
+LP and VAR can give different answers when:
+
+1. **VAR is misspecified**: Wrong lag length, omitted variables, nonlinearities
+2. **Small samples**: LP's horizon-by-horizon estimation is noisier
+3. **Long horizons**: VAR extrapolates; LP estimates directly (sample shrinks)
+
+```{r}
+#| label: lp-vs-var-simulation
+#| fig-cap: "LP vs VAR: Both recover true IRF from correctly specified DGP"
+
+# Simulate a simple AR(1) process
+T <- 200
+rho <- 0.8
+y <- numeric(T)
+shock <- c(1, rep(0, T-1))  # Unit impulse at t=1
+
+for (t in 2:T) {
+  y[t] <- rho * y[t-1] + shock[t]
+}
+
+# True IRF: rho^h
+H <- 12
+true_irf <- rho^(0:H)
+
+# LP estimation
+lp_irf <- numeric(H + 1)
+lp_se <- numeric(H + 1)
+
+for (h in 0:H) {
+  # Create lead of y
+  y_lead <- c(y[(h+1):T], rep(NA, h))
+  y_lag <- c(NA, y[1:(T-1)])
+
+  df <- data.frame(y_lead = y_lead, shock = shock, y_lag = y_lag) %>%
+    filter(!is.na(y_lead) & !is.na(y_lag))
+
+  fit <- lm(y_lead ~ shock + y_lag, data = df)
+  lp_irf[h + 1] <- coef(fit)["shock"]
+  lp_se[h + 1] <- sqrt(diag(vcov(fit)))["shock"]
+}
+
+# VAR estimation (just AR(1) here)
+var_fit <- lm(y[2:T] ~ y[1:(T-1)])
+rho_hat <- coef(var_fit)[2]
+var_irf <- rho_hat^(0:H)
+
+# Plot comparison
+irf_compare <- data.frame(
+  horizon = rep(0:H, 3),
+  irf = c(true_irf, lp_irf, var_irf),
+  method = rep(c("True", "LP", "VAR"), each = H + 1)
+)
+
+ggplot(irf_compare, aes(x = horizon, y = irf, color = method, linetype = method)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("True" = "black", "LP" = "#e74c3c", "VAR" = "#3498db")) +
+  scale_linetype_manual(values = c("True" = "solid", "LP" = "dashed", "VAR" = "dotted")) +
+  labs(title = "LP vs VAR: Impulse Response Comparison",
+       subtitle = "Both recover the true IRF from an AR(1) DGP",
+       x = "Horizon", y = "Response to Unit Shock",
+       color = "Method", linetype = "Method") +
+  theme(legend.position = "top")
+```
+
+# Basic LP Estimation {.unnumbered}
+
+## The Specification
+
+For a panel of countries observed over time:
+
+$$
+y_{i,t+h} - y_{i,t-1} = \alpha_i^h + \delta_t^h + \beta^h \cdot \text{shock}_{it} + \mathbf{X}_{it}'\boldsymbol{\gamma}^h + \varepsilon_{i,t+h}
+$$
+
+**Left-hand side:** Cumulative change from $t-1$ to $t+h$. This gives the **cumulative multiplier**—how much $y$ has changed in total by horizon $h$.
+
+**Right-hand side:**
+- $\alpha_i^h$: Country fixed effects (absorb level differences)
+- $\delta_t^h$: Time fixed effects (absorb common shocks)
+- $\text{shock}_{it}$: The impulse of interest
+- $\mathbf{X}_{it}$: Controls (lags of $y$, other variables)
+
+## Implementation with fixest
+
+```{r}
+#| label: lp-panel-setup
+
+# Generate synthetic panel data
+N <- 30  # countries
+T_obs <- 60  # quarters
+
+# Country fixed effects
+country_fe <- rnorm(N, 0, 2)
+
+# Generate panel
+panel_data <- expand.grid(
+  country = 1:N,
+  time = 1:T_obs
+) %>%
+  arrange(country, time) %>%
+  mutate(
+    # Country effect
+    alpha = country_fe[country],
+    # Time trend + cycle
+    time_effect = 0.02 * time + sin(time / 4) * 0.5,
+    # Shock (e.g., inflation surprise)
+    shock = rnorm(n(), 0, 1),
+    # Autoregressive outcome with shock response
+    y = NA_real_
+  )
+
+# Generate AR process with shock impact
+for (i in 1:N) {
+  idx <- which(panel_data$country == i)
+  y_country <- numeric(T_obs)
+
+  for (t in 2:T_obs) {
+    # True DGP: y responds to shock with persistence
+    y_country[t] <- 0.7 * y_country[t-1] +
+                    0.5 * panel_data$shock[idx[t]] +  # Immediate impact
+                    0.3 * panel_data$shock[idx[t-1]] + # Delayed impact
+                    country_fe[i] * 0.1 +
+                    rnorm(1, 0, 0.5)
+  }
+  panel_data$y[idx] <- y_country
+}
+
+# Convert to panel
+pdata <- panel(panel_data, ~country + time)
+
+cat("Panel dimensions:", N, "countries,", T_obs, "periods\n")
+```
+
+```{r}
+#| label: lp-estimation
+#| fig-cap: "Local Projection impulse responses with 95% confidence bands"
+
+# Estimate LP at each horizon
+H <- 12
+results <- data.frame(
+  horizon = 0:H,
+  estimate = NA_real_,
+  se = NA_real_,
+  ci_low = NA_real_,
+  ci_high = NA_real_
+)
+
+for (h in 0:H) {
+  # LP regression: y_{t+h} - y_{t-1} on shock_t
+  model <- feols(
+    f(y, h) - l(y, 1) ~ shock + l(y, 1:2) | country + time,
+    data = pdata,
+    vcov = ~country  # Cluster by country
+  )
+
+  results$estimate[h + 1] <- coef(model)["shock"]
+  results$se[h + 1] <- se(model)["shock"]
+  results$ci_low[h + 1] <- results$estimate[h + 1] - 1.96 * results$se[h + 1]
+  results$ci_high[h + 1] <- results$estimate[h + 1] + 1.96 * results$se[h + 1]
+}
+
+# Plot IRF
+ggplot(results, aes(x = horizon, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_ribbon(aes(ymin = ci_low, ymax = ci_high), alpha = 0.2, fill = "#3498db") +
+  geom_line(color = "#3498db", size = 1.2) +
+  geom_point(color = "#3498db", size = 2) +
+  labs(title = "Local Projection: Response to Unit Shock",
+       subtitle = "Cumulative response with 95% confidence bands (clustered by country)",
+       x = "Horizon (periods)",
+       y = "Cumulative Response") +
+  scale_x_continuous(breaks = 0:H)
+```
+
+## Inference: Why HAC/Clustering Matters
+
+At horizon $h$, the LP residual $\varepsilon_{i,t+h}$ is correlated with $\varepsilon_{i,t+h-1}, \ldots, \varepsilon_{i,t+1}$ by construction (overlapping observations).
+
+**This induces MA(h-1) serial correlation in errors.**
+
+Standard OLS standard errors are **invalid**. Must use:
+
+| Method | When | Implementation |
+|--------|------|----------------|
+| Newey-West HAC | Time series | `sandwich::NeweyWest(lags = h)` |
+| Cluster by unit | Panel, short T | `vcov = ~country` |
+| Driscoll-Kraay | Panel, cross-sectional dependence | `vcov = "DK"` in some packages |
+
+```{r}
+#| label: se-comparison
+#| fig-cap: "Standard errors grow with horizon due to overlapping residuals"
+
+# Compare SE across horizons
+se_by_horizon <- data.frame(
+  horizon = 0:H,
+  cluster_se = results$se,
+  # For comparison, also compute OLS SE (wrong!)
+  ols_se = NA_real_
+)
+
+for (h in 0:H) {
+  model_ols <- feols(
+    f(y, h) - l(y, 1) ~ shock + l(y, 1:2) | country + time,
+    data = pdata,
+    vcov = "iid"  # Wrong but instructive
+  )
+  se_by_horizon$ols_se[h + 1] <- se(model_ols)["shock"]
+}
+
+se_long <- se_by_horizon %>%
+  pivot_longer(cols = c(cluster_se, ols_se),
+               names_to = "method", values_to = "se")
+
+ggplot(se_long, aes(x = horizon, y = se, color = method)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("cluster_se" = "#2ecc71", "ols_se" = "#e74c3c"),
+                     labels = c("Clustered (correct)", "IID (wrong)")) +
+  labs(title = "Standard Errors by Horizon",
+       subtitle = "Clustered SEs account for serial correlation; IID SEs are too small",
+       x = "Horizon", y = "Standard Error",
+       color = "Method") +
+  theme(legend.position = "top")
+```
+
+# State-Dependent Local Projections {.unnumbered}
+
+A major advantage of LP over VAR: it's easy to allow impulse responses to vary with the state of the economy.
+
+## Binary State Switching
+
+The simplest approach: interact the shock with a state indicator.
+
+$$
+y_{i,t+h} - y_{i,t-1} = \alpha_i^h + \beta_0^h \cdot (1 - S_{it}) \cdot \text{shock}_{it} + \beta_1^h \cdot S_{it} \cdot \text{shock}_{it} + \cdots
+$$
+
+where $S_{it} = 1$ if country $i$ is in "state 1" at time $t$.
+
+**Examples of state variables:**
+- Recession vs. expansion
+- High vs. low debt
+- Financial crisis vs. normal times
+- High vs. low bank holdings of sovereign debt
+
+```{r}
+#| label: state-dependent-lp
+#| fig-cap: "State-dependent LP: Responses differ by regime"
+
+# Add state variable: high vs low initial shock exposure
+panel_data <- panel_data %>%
+  group_by(country) %>%
+  mutate(
+    # State based on lagged cumulative shock exposure
+    cum_shock = cumsum(shock),
+    high_state = as.integer(lag(cum_shock, 1) > median(lag(cum_shock, 1), na.rm = TRUE))
+  ) %>%
+  ungroup() %>%
+  mutate(high_state = replace_na(high_state, 0))
+
+pdata <- panel(panel_data, ~country + time)
+
+# Estimate state-dependent LP
+results_state <- data.frame(
+  horizon = rep(0:H, 2),
+  state = rep(c("Low", "High"), each = H + 1),
+  estimate = NA_real_,
+  se = NA_real_
+)
+
+for (h in 0:H) {
+  model_state <- feols(
+    f(y, h) - l(y, 1) ~ i(high_state, shock) + l(y, 1:2) | country + time,
+    data = pdata,
+    vcov = ~country
+  )
+
+  # Extract coefficients for each state
+  coef_names <- names(coef(model_state))
+
+  # Low state (high_state = 0)
+  low_idx <- grep("high_state::0:shock", coef_names)
+  if (length(low_idx) > 0) {
+    results_state$estimate[h + 1] <- coef(model_state)[low_idx]
+    results_state$se[h + 1] <- se(model_state)[low_idx]
+  }
+
+  # High state (high_state = 1)
+  high_idx <- grep("high_state::1:shock", coef_names)
+  if (length(high_idx) > 0) {
+    results_state$estimate[H + 2 + h] <- coef(model_state)[high_idx]
+    results_state$se[H + 2 + h] <- se(model_state)[high_idx]
+  }
+}
+
+results_state <- results_state %>%
+  mutate(
+    ci_low = estimate - 1.96 * se,
+    ci_high = estimate + 1.96 * se
+  )
+
+ggplot(results_state, aes(x = horizon, y = estimate, color = state, fill = state)) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_ribbon(aes(ymin = ci_low, ymax = ci_high), alpha = 0.2, color = NA) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Low" = "#3498db", "High" = "#e74c3c")) +
+  scale_fill_manual(values = c("Low" = "#3498db", "High" = "#e74c3c")) +
+  labs(title = "State-Dependent Impulse Responses",
+       subtitle = "Response to shock differs by regime",
+       x = "Horizon", y = "Cumulative Response",
+       color = "State", fill = "State") +
+  theme(legend.position = "top")
+```
+
+## Smooth Transition (Auerbach-Gorodnichenko)
+
+Instead of hard switching, use a logistic function for smooth transition:
+
+$$
+F(z_t) = \frac{\exp(-\gamma z_t)}{1 + \exp(-\gamma z_t)}
+$$
+
+where:
+- $z_t$ is the (standardized) state variable
+- $\gamma > 0$ controls transition speed
+- $F(z_t) \to 1$ when $z_t \to -\infty$ (e.g., deep recession)
+- $F(z_t) \to 0$ when $z_t \to +\infty$ (e.g., strong expansion)
+
+The LP specification becomes:
+
+$$
+y_{t+h} = F(z_{t-1}) \cdot [\alpha_R^h + \beta_R^h \cdot \text{shock}_t] + (1 - F(z_{t-1})) \cdot [\alpha_E^h + \beta_E^h \cdot \text{shock}_t] + \cdots
+$$
+
+```{r}
+#| label: smooth-transition
+#| fig-cap: "Smooth transition function for state-dependent LP"
+
+# Demonstrate the logistic transition function
+z <- seq(-3, 3, length.out = 100)
+gamma_values <- c(1, 2, 5)
+
+transition_df <- expand.grid(z = z, gamma = gamma_values) %>%
+  mutate(
+    F_z = exp(-gamma * z) / (1 + exp(-gamma * z)),
+    gamma_label = paste("γ =", gamma)
+  )
+
+ggplot(transition_df, aes(x = z, y = F_z, color = gamma_label)) +
+  geom_line(size = 1.2) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.3) +
+  labs(title = "Logistic Transition Function",
+       subtitle = "Higher γ = sharper transition between regimes",
+       x = "Standardized State Variable (z)",
+       y = "F(z) = Probability of 'Recession' Regime",
+       color = "Smoothness") +
+  annotate("text", x = -2, y = 0.9, label = "Recession\nregime") +
+  annotate("text", x = 2, y = 0.1, label = "Expansion\nregime") +
+  theme(legend.position = "top")
+```
+
+## Testing for State Dependence
+
+To test whether responses genuinely differ across states:
+
+$$
+H_0: \beta_0^h = \beta_1^h \quad \forall h
+$$
+
+**Methods:**
+1. **Joint F-test**: Test equality of coefficients across horizons
+2. **Horizon-by-horizon t-tests**: Test $\beta_0^h - \beta_1^h = 0$ at each $h$
+3. **Cumulative difference**: Test whether cumulative response differs
+
+::: {.callout-warning}
+## Common Mistake
+Showing that $\beta_0^h$ is significant and $\beta_1^h$ is not significant does NOT prove they're different. You must test the **difference** directly.
+:::
+
+# LP-DiD: Combining LP with Difference-in-Differences {.unnumbered}
+
+LP-DiD (Jordà, Dube, Girardi & Taylor, 2024) extends local projections to treatment effect settings with staggered adoption.
+
+## The Setting
+
+- Some units receive treatment at different times
+- We want to trace out the **dynamic treatment effect** at each horizon
+- Standard DiD gives one number; LP-DiD gives a path
+
+## The Specification
+
+$$
+y_{i,t+h} - y_{i,t-1} = \alpha_i + \delta_t + \beta^h \cdot D_{it} + \mathbf{X}_{it}'\boldsymbol{\gamma}^h + \varepsilon_{i,t+h}
+$$
+
+where:
+- $D_{it} = 1$ if unit $i$ is treated at time $t$
+- $\alpha_i$ = unit fixed effects
+- $\delta_t$ = time fixed effects
+- $\beta^h$ = treatment effect at horizon $h$
+
+**Key features:**
+- Estimates treatment effect at each horizon (not just one average)
+- Includes negative horizons to test pre-trends
+- Robust to heterogeneous treatment timing
+
+```{r}
+#| label: lp-did-simulation
+#| fig-cap: "LP-DiD: Dynamic treatment effects with pre-trend check"
+
+# Simulate LP-DiD setting (simplified: single treatment time)
+N_did <- 40
+T_did <- 30
+T_treat <- 15  # Treatment at period 15
+
+# Generate unit fixed effects
+unit_fe <- rnorm(N_did, 0, 2)
+time_fe <- 0.1 * (1:T_did) + rnorm(T_did, 0, 0.3)
+
+did_data <- expand.grid(
+  unit = 1:N_did,
+  time = 1:T_did
+) %>%
+  arrange(unit, time) %>%
+  mutate(
+    # First 20 units are treated, rest are control
+    treated_unit = unit <= 20,
+    post = time >= T_treat,
+    treated = treated_unit & post,
+    rel_time = ifelse(treated_unit, time - T_treat, NA),
+    # Fixed effects
+    unit_effect = unit_fe[unit],
+    time_effect = time_fe[time],
+    # True treatment effect builds over time (max at +5)
+    true_effect = ifelse(treated, pmin(time - T_treat + 1, 5) * 0.4, 0),
+    y = unit_effect + time_effect + true_effect + rnorm(n(), 0, 0.8)
+  )
+
+# Estimate LP-DiD at each horizon
+H_did <- 8
+lp_did_results <- data.frame(
+  horizon = 0:H_did,
+  estimate = NA_real_,
+  se = NA_real_
+)
+
+for (h in 0:H_did) {
+  # Create lead of y manually
+  did_data_h <- did_data %>%
+    group_by(unit) %>%
+    mutate(
+      y_lead = lead(y, h),
+      y_lag = lag(y, 1)
+    ) %>%
+    ungroup() %>%
+    filter(!is.na(y_lead) & !is.na(y_lag))
+
+  model_did <- feols(
+    y_lead - y_lag ~ treated | unit + time,
+    data = did_data_h,
+    vcov = ~unit
+  )
+
+  lp_did_results$estimate[h + 1] <- coef(model_did)["treatedTRUE"]
+  lp_did_results$se[h + 1] <- se(model_did)["treatedTRUE"]
+}
+
+lp_did_results <- lp_did_results %>%
+  mutate(
+    ci_low = estimate - 1.96 * se,
+    ci_high = estimate + 1.96 * se
+  )
+
+# Also compute pre-trend check (negative horizons)
+# For pre-trends, we test whether treated units had different growth rates
+# before treatment. Since treated_unit is time-invariant, we use time FE only
+# (not unit FE) to avoid collinearity.
+pre_results <- data.frame(
+  horizon = (-4):(-1),
+  estimate = NA_real_,
+  se = NA_real_
+)
+
+for (h in (-4):(-1)) {
+  did_data_h <- did_data %>%
+    filter(time < T_treat) %>%  # Pre-treatment only
+    group_by(unit) %>%
+    mutate(
+      y_lead = lead(y, -h),  # Note: negative h means lag
+      y_lag = lag(y, 1)
+    ) %>%
+    ungroup() %>%
+    filter(!is.na(y_lead) & !is.na(y_lag))
+
+  if (nrow(did_data_h) > 50) {
+    # Use time FE only for pre-trends (treated_unit is unit-level, collinear with unit FE)
+    # This tests: did treated units have different GROWTH before treatment?
+    model_pre <- feols(
+      y_lead - y_lag ~ treated_unit | time,
+      data = did_data_h,
+      vcov = ~unit
+    )
+    idx <- h + 5
+    pre_results$estimate[idx] <- coef(model_pre)["treated_unitTRUE"]
+    pre_results$se[idx] <- se(model_pre)["treated_unitTRUE"]
+  }
+}
+
+pre_results <- pre_results %>%
+  mutate(ci_low = estimate - 1.96 * se, ci_high = estimate + 1.96 * se)
+
+# Combine
+all_results <- bind_rows(
+  pre_results %>% mutate(period = "Pre-treatment"),
+  lp_did_results %>% mutate(period = "Post-treatment")
+)
+
+ggplot(all_results, aes(x = horizon, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_vline(xintercept = -0.5, linetype = "dashed", alpha = 0.5) +
+  geom_ribbon(aes(ymin = ci_low, ymax = ci_high, fill = period), alpha = 0.2) +
+  geom_line(aes(color = period), size = 1.2) +
+  geom_point(aes(color = period), size = 2) +
+  scale_color_manual(values = c("Pre-treatment" = "#95a5a6", "Post-treatment" = "#e74c3c")) +
+  scale_fill_manual(values = c("Pre-treatment" = "#95a5a6", "Post-treatment" = "#e74c3c")) +
+  labs(title = "LP-DiD: Dynamic Treatment Effects",
+       subtitle = "Pre-treatment coefficients test parallel trends",
+       x = "Horizon (periods relative to treatment)",
+       y = "Treatment Effect",
+       color = "Period", fill = "Period") +
+  annotate("text", x = -2.5, y = 0.3, label = "Pre-trends\n(≈ 0)", size = 3) +
+  annotate("text", x = 5, y = 2, label = "Treatment\neffect builds", size = 3) +
+  theme(legend.position = "top")
+```
+
+## LP-DiD vs. Standard Event Study
+
+| Feature | Standard Event Study | LP-DiD |
+|---------|---------------------|--------|
+| LHS | $y_{it}$ | $y_{i,t+h} - y_{i,t-1}$ |
+| Interpretation | Level relative to $t=-1$ | Cumulative change |
+| Horizons | Relative time dummies | Direct projection |
+| Handles dynamics | Imposes structure | Flexible |
+
+LP-DiD is particularly useful when:
+- Treatment effects build gradually
+- You want impulse response interpretation
+- Dynamics are complex or nonlinear
+
+# Diagnostics and Practical Issues {.unnumbered}
+
+## Sample Erosion at Long Horizons
+
+At horizon $h$, you lose $h$ observations from the end of your sample:
+- $h = 0$: Full sample
+- $h = 12$: Lose 12 periods (3 years of quarterly data)
+
+```{r}
+#| label: sample-erosion
+
+sample_sizes <- data.frame(
+  horizon = 0:H,
+  n_obs = sapply(0:H, function(h) {
+    sum(!is.na(panel_data$y) &
+        (panel_data$time <= T_obs - h) &
+        (panel_data$time > 2))
+  })
+)
+
+ggplot(sample_sizes, aes(x = horizon, y = n_obs)) +
+  geom_line(size = 1.2, color = "#9b59b6") +
+  geom_point(size = 2, color = "#9b59b6") +
+  labs(title = "Sample Size by Horizon",
+       subtitle = "Sample shrinks as horizon increases",
+       x = "Horizon", y = "Number of Observations") +
+  scale_y_continuous(labels = scales::comma)
+```
+
+**Implications:**
+- Confidence intervals widen at longer horizons (less data + more uncertainty)
+- Truncate horizons when CIs become uninformative
+- Report effective sample size at each horizon
+
+## Lag Selection
+
+**Rule:** Use the **same lag structure across all horizons** for comparability.
+
+Methods:
+1. Information criteria (AIC, BIC) on the $h = 0$ regression
+2. LM test for serial correlation in residuals
+3. Rule of thumb: 2-4 lags for quarterly, 1-2 for annual
+
+```{r}
+#| label: lag-selection
+
+# Compare different lag specifications at h = 4
+lag_comparison <- data.frame(
+  lags = 1:6,
+  aic = NA_real_,
+  bic = NA_real_
+)
+
+h_test <- 4
+
+for (p in 1:6) {
+  # Build formula with p lags
+  formula_str <- paste0("f(y, ", h_test, ") - l(y, 1) ~ shock + l(y, 1:", p, ") | country + time")
+
+  model_lag <- feols(as.formula(formula_str), data = pdata, vcov = ~country)
+
+  lag_comparison$aic[p] <- AIC(model_lag)
+  lag_comparison$bic[p] <- BIC(model_lag)
+}
+
+lag_comparison_long <- lag_comparison %>%
+  pivot_longer(cols = c(aic, bic), names_to = "criterion", values_to = "value")
+
+ggplot(lag_comparison_long, aes(x = lags, y = value, color = criterion)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c("aic" = "#3498db", "bic" = "#e74c3c"),
+                     labels = c("AIC", "BIC")) +
+  labs(title = "Lag Selection for LP",
+       subtitle = paste("Information criteria at horizon h =", h_test),
+       x = "Number of Lags", y = "Information Criterion",
+       color = "Criterion") +
+  theme(legend.position = "top")
+```
+
+## Cumulative vs. Non-Cumulative
+
+**Cumulative (recommended for levels):**
+$$
+\text{LHS} = y_{t+h} - y_{t-1}
+$$
+Interpretation: Total change from $t-1$ to $t+h$.
+
+**Non-cumulative:**
+$$
+\text{LHS} = y_{t+h}
+$$
+Interpretation: Level at $t+h$ (includes pre-existing trend).
+
+Use cumulative for:
+- GDP, debt/GDP, price level
+- Any variable where you care about the total change
+
+Use non-cumulative for:
+- Growth rates, inflation (already differenced)
+- When you want the level effect
+
+## Comparing LP and VAR IRFs
+
+Always compare LP and VAR when possible:
+
+```{r}
+#| label: lp-var-comparison
+#| fig-cap: "LP produces wider but more robust confidence intervals than VAR"
+
+# This is stylized - in practice, estimate both and compare
+
+comparison_data <- data.frame(
+  horizon = rep(0:H, 2),
+  method = rep(c("LP", "VAR"), each = H + 1),
+  estimate = c(results$estimate, results$estimate * 0.95),  # Stylized: VAR slightly different
+  ci_width = c(results$se * 1.96 * 2, results$se * 1.96 * 1.3)  # LP wider CIs
+)
+
+ggplot(comparison_data, aes(x = horizon, y = estimate, color = method)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = estimate - ci_width/2, ymax = estimate + ci_width/2),
+                width = 0.3, alpha = 0.5) +
+  scale_color_manual(values = c("LP" = "#e74c3c", "VAR" = "#3498db")) +
+  labs(title = "LP vs VAR: Point Estimates and Confidence Intervals",
+       subtitle = "LP has wider CIs but is more robust to misspecification",
+       x = "Horizon", y = "Response",
+       color = "Method") +
+  theme(legend.position = "top")
+```
+
+**When LP and VAR disagree:**
+- Check VAR specification (lags, variables)
+- LP is likely more robust to misspecification
+- VAR may be picking up spurious dynamics
+
+# Frequently Asked Questions {.unnumbered}
+
+## When should I use LP vs. VAR?
+
+**Use LP when:**
+- You only need to identify ONE shock
+- Misspecification is a concern
+- You want state-dependent or nonlinear responses
+- You're working with panel data
+
+**Use VAR when:**
+- You need the full system (FEVD, historical decomposition)
+- Efficiency matters and you trust the specification
+- Short horizons with well-identified structure
+
+## How do I choose the horizon H?
+
+- Plot IRFs and extend until they converge to zero (or steady state)
+- Stop when confidence intervals become uninformative
+- Rule of thumb: H = 4-5 years for quarterly macro data
+- Report effective sample sizes
+
+## What controls should I include?
+
+- Lagged dependent variable (always)
+- Variables that affect both shock and outcome (confounders)
+- **Don't include** post-treatment controls (bad controls)
+- Keep controls consistent across horizons
+
+## How do I report results?
+
+1. **Plot the IRF** with confidence bands
+2. **Report** the peak response and time to peak
+3. **Table** with point estimates and SEs at key horizons
+4. **Report** sample size at each horizon
+5. **Compare** with VAR if possible
+
+# Summary {.unnumbered}
+
+Key takeaways from this module:
+
+1. **LP estimates IRFs directly** at each horizon—no need to specify full system
+
+2. **LP and VAR give same population IRFs** but LP is more robust to misspecification
+
+3. **Use HAC or clustered SEs**—overlapping residuals create serial correlation
+
+4. **State-dependent LP** is easy: interact shock with state indicator
+
+5. **LP-DiD** extends to treatment effect settings with dynamic effects
+
+6. **Sample erodes** at longer horizons—report effective sample sizes
+
+7. **Confidence intervals widen** with horizon—this is a feature, not a bug
+
+---
+
+*Next: [Module 4: Vector Autoregressions](04_var_svar.qmd)*

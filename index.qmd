@@ -1,0 +1,72 @@
+---
+title: "Mastering Empirical Macroeconometrics"
+number-sections: false
+---
+
+# Welcome {.unnumbered}
+
+This is a comprehensive, hands-on curriculum for learning empirical macroeconometrics---from foundational panel data methods through Bayesian VARs and structural DSGE estimation.
+
+## Who This Is For
+
+This curriculum is designed for:
+
+- **PhD students** in economics who want deep understanding of the methods they use
+- **Applied researchers** who want to go beyond "running the code" to understanding *why* methods work
+- **Policy economists** at central banks and research institutions
+
+## Philosophy
+
+Each module follows a consistent structure:
+
+1. **Theory Block**: Mathematical foundations, key theorems, identification assumptions
+2. **Monte Carlo Lab**: Simulate known DGPs → estimate → verify properties (coverage, power, bias)
+3. **Applied Example**: Apply methods to real macroeconomic data
+4. **Diagnostics Checklist**: What to check, what can go wrong, red flags
+
+The goal is not just to *use* these methods, but to *understand* them deeply enough to defend your choices to a skeptical audience.
+
+## Curriculum Overview
+
+| Phase | Topic | Modules | Language |
+|-------|-------|---------|----------|
+| 1 | Foundations | Panel Econometrics, Identification | R |
+| 2 | Dynamic Methods | Local Projections, VAR/SVAR | R |
+| 3 | Treatment Effects | Staggered DiD, Synthetic Control | R |
+| 4 | Bayesian Econometrics | Foundations, BVAR, Panel Methods | Python |
+| 5 | Structural Macro | DSGE Foundations, Estimation | MATLAB/Python |
+| 6 | Causal ML | Regularization, Causal Forests | Python |
+
+## Motivation
+
+Modern empirical macroeconomics requires fluency in a wide range of methods. A single research project might require:
+
+- **Panel regressions** to establish baseline correlations across countries
+- **Local projections** to trace dynamic responses to shocks
+- **Staggered difference-in-differences** to handle heterogeneous treatment timing
+- **Vector autoregressions** to characterize transmission mechanisms
+- **Bayesian methods** for shrinkage and structural identification
+- **Machine learning** to uncover heterogeneous effects
+
+Rather than treating these as black boxes, this curriculum develops the intuition needed to choose, implement, and defend each method.
+
+## Getting Started
+
+Start with [Module 1: Panel Data Econometrics](chapters/01_panel_econometrics.qmd) and work through sequentially. Each module builds on previous concepts.
+
+::: {.callout-tip}
+## Reproducibility
+
+Most examples use publicly available macroeconomic data (Penn World Table, IMF IFS, World Bank WDI). Code is fully reproducible---clone the repository and render locally.
+:::
+
+## Technical Requirements
+
+- **R** (≥4.0) with packages: `fixest`, `lmtest`, `sandwich`, `ggplot2`, `dplyr`
+- **Python** (≥3.9) with packages: `numpy`, `pandas`, `statsmodels`, `pymc`, `arviz`
+- **MATLAB** (optional) for DSGE modules, or use Dynare with Octave
+- **Quarto** (≥1.3) for rendering
+
+---
+
+*Last updated: `r Sys.Date()`*

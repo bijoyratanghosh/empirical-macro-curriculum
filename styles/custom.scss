@@ -1,0 +1,173 @@
+/*-- scss:defaults --*/
+
+// Colors matching Minimal Light theme - clean, academic aesthetic
+$body-bg: #ffffff;
+$body-color: #333333;
+$link-color: #0066cc;
+$code-bg: #f8f8f8;
+$border-color: #e5e5e5;
+
+// Typography - clean, readable
+$font-family-sans-serif: "Helvetica Neue", Helvetica, Arial, sans-serif;
+$font-family-monospace: "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+$headings-font-weight: 500;
+
+// Navbar styling
+$navbar-bg: #ffffff;
+$navbar-fg: #333333;
+
+// Sidebar styling
+$sidebar-bg: #fafafa;
+$sidebar-fg: #333333;
+
+/*-- scss:rules --*/
+
+// Clean, minimal body styling
+body {
+  background-color: $body-bg;
+  color: $body-color;
+  line-height: 1.6;
+}
+
+// Cleaner headings
+h1, h2, h3, h4, h5, h6 {
+  color: #222222;
+  font-weight: $headings-font-weight;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+h1 {
+  border-bottom: 1px solid $border-color;
+  padding-bottom: 0.3rem;
+}
+
+// Minimal link styling
+a {
+  color: $link-color;
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+// Clean code blocks
+pre {
+  background-color: $code-bg;
+  border: 1px solid $border-color;
+  border-radius: 4px;
+  padding: 1rem;
+}
+
+code {
+  background-color: $code-bg;
+  padding: 0.2em 0.4em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+pre code {
+  background-color: transparent;
+  padding: 0;
+}
+
+// Sidebar - clean and minimal
+.sidebar {
+  background-color: $sidebar-bg;
+  border-right: 1px solid $border-color;
+}
+
+.sidebar-title {
+  font-weight: 500;
+  color: #222222;
+}
+
+// Navbar - minimal styling
+.navbar {
+  background-color: $navbar-bg !important;
+  border-bottom: 1px solid $border-color;
+  box-shadow: none;
+}
+
+// Tables - clean academic style
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+}
+
+th, td {
+  border: 1px solid $border-color;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+th {
+  background-color: $code-bg;
+  font-weight: 500;
+}
+
+// Callouts - subtle styling
+.callout {
+  border-left: 4px solid #0066cc;
+  background-color: #f9f9f9;
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+}
+
+.callout-tip {
+  border-left-color: #28a745;
+}
+
+.callout-warning {
+  border-left-color: #ffc107;
+}
+
+.callout-important {
+  border-left-color: #dc3545;
+}
+
+// Figure captions
+figcaption, .figure-caption {
+  font-size: 0.9rem;
+  color: #666666;
+  font-style: italic;
+  margin-top: 0.5rem;
+}
+
+// Footer - minimal
+.page-footer {
+  background-color: #fafafa;
+  border-top: 1px solid $border-color;
+  font-size: 0.85rem;
+  color: #666666;
+}
+
+// Part headers in TOC
+.sidebar-item-section {
+  font-weight: 500;
+  color: #333333;
+  margin-top: 1rem;
+}
+
+// Active chapter highlighting
+.sidebar-item.active {
+  background-color: #e8f4fc;
+  border-left: 3px solid $link-color;
+}
+
+// Equations
+.MathJax {
+  font-size: 1.1em;
+}
+
+// Blockquotes - academic style
+blockquote {
+  border-left: 3px solid #cccccc;
+  padding-left: 1rem;
+  color: #555555;
+  font-style: italic;
+  margin: 1rem 0;
+}
+

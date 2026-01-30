@@ -1,0 +1,683 @@
+---
+title: "Vector Autoregressions"
+subtitle: "From Reduced Form to Structural Identification"
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  fig.width = 10, fig.height = 6, fig.align = "center"
+)
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(vars)
+library(MASS)
+
+theme_set(theme_minimal(base_size = 13))
+set.seed(42)
+```
+
+# The VAR Framework {.unnumbered}
+
+Vector Autoregressions (VARs) model the joint dynamics of multiple time series. VARs became the workhorse of empirical macroeconomics because they impose minimal theoretical structure while capturing rich dynamic interactions. For a comprehensive treatment, see @kilian2017.
+
+## From Single Equations to Systems
+
+Consider a simple monetary policy question: How does output respond to an interest rate change?
+
+**Single equation approach**:
+$$
+y_t = \alpha + \beta \cdot r_t + \varepsilon_t
+$$
+
+Problems:
+- Interest rates respond to output (simultaneity)
+- Past values of both matter (dynamics)
+- Other variables are omitted
+
+**VAR approach**: Model everything jointly:
+$$
+\begin{bmatrix} y_t \\ \pi_t \\ r_t \end{bmatrix} = \mathbf{c} + \mathbf{A}_1 \begin{bmatrix} y_{t-1} \\ \pi_{t-1} \\ r_{t-1} \end{bmatrix} + \mathbf{A}_2 \begin{bmatrix} y_{t-2} \\ \pi_{t-2} \\ r_{t-2} \end{bmatrix} + \begin{bmatrix} u_{1t} \\ u_{2t} \\ u_{3t} \end{bmatrix}
+$$
+
+# Reduced-Form VAR {.unnumbered}
+
+## The Model
+
+A VAR(p) for K variables:
+$$
+\mathbf{y}_t = \mathbf{c} + \mathbf{A}_1 \mathbf{y}_{t-1} + \mathbf{A}_2 \mathbf{y}_{t-2} + \cdots + \mathbf{A}_p \mathbf{y}_{t-p} + \mathbf{u}_t
+$$
+
+where:
+- $\mathbf{y}_t$ is $K \times 1$ vector of endogenous variables
+- $\mathbf{A}_j$ are $K \times K$ coefficient matrices
+- $\mathbf{u}_t \sim N(\mathbf{0}, \boldsymbol{\Sigma}_u)$ are reduced-form residuals
+- $\boldsymbol{\Sigma}_u$ captures contemporaneous correlations
+
+**Key property**: Reduced-form residuals $\mathbf{u}_t$ are correlated across equations. They are **not** structural shocks.
+
+## Estimation
+
+Each equation can be estimated by OLS (since all equations have the same regressors). Let's simulate and estimate.
+
+```{r}
+#| label: var-simulation
+#| fig-cap: "Simulated three-variable VAR system"
+
+# Simulate a simple 3-variable VAR(2)
+simulate_var <- function(T_obs, A1, A2, Sigma, burn = 100) {
+  K <- nrow(A1)
+  Y <- matrix(0, T_obs + burn, K)
+
+  # Generate shocks
+  U <- mvrnorm(T_obs + burn, mu = rep(0, K), Sigma = Sigma)
+
+  for (t in 3:(T_obs + burn)) {
+    Y[t, ] <- A1 %*% Y[t-1, ] + A2 %*% Y[t-2, ] + U[t, ]
+  }
+
+  Y[(burn + 1):(T_obs + burn), ]
+}
+
+# True parameters
+A1_true <- matrix(c(
+  0.5,  0.1,  0.0,   # GDP equation
+  0.2,  0.6, -0.1,   # Inflation equation
+  0.1,  0.3,  0.7    # Interest rate equation
+), nrow = 3, byrow = TRUE)
+
+A2_true <- matrix(c(
+  0.2, -0.1,  0.0,
+  0.0,  0.1,  0.05,
+  0.0,  0.1,  0.1
+), nrow = 3, byrow = TRUE)
+
+# Reduced-form covariance (correlated shocks)
+Sigma_true <- matrix(c(
+  1.0, 0.3, 0.1,
+  0.3, 0.5, 0.2,
+  0.1, 0.2, 0.3
+), nrow = 3)
+
+# Simulate
+Y <- simulate_var(200, A1_true, A2_true, Sigma_true)
+colnames(Y) <- c("GDP", "Inflation", "Rate")
+
+# Plot
+data.frame(
+  time = 1:nrow(Y),
+  as.data.frame(Y)
+) %>%
+  pivot_longer(-time, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = time, y = value)) +
+  geom_line(color = "#3498db") +
+  facet_wrap(~variable, scales = "free_y", ncol = 1) +
+  labs(title = "Simulated VAR(2) Data",
+       x = "Time", y = "Value")
+```
+
+```{r}
+#| label: var-estimation
+
+# Estimate VAR using vars package
+Y_ts <- ts(Y, frequency = 4)
+
+# Select lag length
+lag_select <- VARselect(Y_ts, lag.max = 8, type = "const")
+cat("Lag selection criteria:\n")
+print(lag_select$selection)
+
+# Estimate VAR(2)
+var_model <- VAR(Y_ts, p = 2, type = "const")
+
+# Check stability
+cat("\nEigenvalues of companion matrix (all should be < 1):\n")
+print(round(roots(var_model), 3))
+```
+
+## Companion Form and Stability
+
+For analysis, we write the VAR in companion form:
+$$
+\mathbf{Y}_t = \mathbf{A}_{comp} \mathbf{Y}_{t-1} + \mathbf{U}_t
+$$
+
+where $\mathbf{Y}_t = [\mathbf{y}_t', \mathbf{y}_{t-1}', \ldots]'$ stacks lagged values.
+
+**Stability condition**: All eigenvalues of $\mathbf{A}_{comp}$ must lie inside the unit circle. If any eigenvalue equals 1, there's a unit root; if greater than 1, the system is explosive.
+
+# The Identification Problem {.unnumbered}
+
+## Why Structure Matters
+
+The reduced-form VAR gives us $\boldsymbol{\Sigma}_u$—the covariance of residuals. But we want **structural shocks** $\boldsymbol{\varepsilon}_t$ that are:
+- Uncorrelated with each other
+- Have economic interpretation (demand shock, supply shock, monetary shock)
+
+The structural form:
+$$
+\mathbf{B}_0 \mathbf{y}_t = \mathbf{b}_0 + \mathbf{B}_1 \mathbf{y}_{t-1} + \cdots + \boldsymbol{\varepsilon}_t, \quad \boldsymbol{\varepsilon}_t \sim N(\mathbf{0}, \mathbf{I})
+$$
+
+Connection to reduced form:
+$$
+\mathbf{u}_t = \mathbf{B}_0^{-1} \boldsymbol{\varepsilon}_t \implies \boldsymbol{\Sigma}_u = \mathbf{B}_0^{-1} (\mathbf{B}_0^{-1})'
+$$
+
+## The Counting Problem
+
+With K variables:
+- $\boldsymbol{\Sigma}_u$ has $K(K+1)/2$ unique elements
+- $\mathbf{B}_0^{-1}$ has $K^2$ elements
+- We need $K(K-1)/2$ **additional restrictions**
+
+For K=3: We observe 6 unique elements of $\Sigma_u$, but need 9 elements of $B_0^{-1}$. We need 3 restrictions.
+
+::: {.callout-important}
+## The Fundamental Challenge
+Moving from reduced-form to structural requires **identifying assumptions**. Different assumptions = different structural shocks = potentially different conclusions.
+:::
+
+# Recursive (Cholesky) Identification {.unnumbered}
+
+## The Approach
+
+The simplest identification: assume a **recursive** causal ordering.
+
+$$
+\mathbf{B}_0^{-1} = \text{chol}(\boldsymbol{\Sigma}_u) \quad \text{(lower triangular)}
+$$
+
+This imposes:
+- Variable 1 doesn't respond contemporaneously to variables 2 or 3
+- Variable 2 doesn't respond contemporaneously to variable 3
+- Variable 3 responds to everything
+
+## Economic Interpretation
+
+For monetary policy, a common ordering: **slow → policy → fast**
+
+1. **GDP** (slow): doesn't respond within quarter to anything
+2. **Inflation** (medium): responds to GDP shocks, not rate within quarter
+3. **Interest rate** (fast): central bank sees GDP and inflation, then sets rate
+
+```{r}
+#| label: cholesky-irf
+#| fig-cap: "Impulse responses to monetary policy shock (Cholesky identification)"
+
+# Compute Cholesky-identified IRFs
+irf_chol <- irf(var_model, impulse = "Rate", response = c("GDP", "Inflation", "Rate"),
+                n.ahead = 20, ortho = TRUE, boot = TRUE, ci = 0.68, runs = 100)
+
+# Extract and plot
+plot_irf <- function(irf_obj, shock_name) {
+  responses <- names(irf_obj$irf)
+
+  irf_data <- lapply(responses, function(resp) {
+    data.frame(
+      horizon = 0:(length(irf_obj$irf[[resp]][, 1]) - 1),
+      response = resp,
+      estimate = irf_obj$irf[[resp]][, 1],
+      lower = irf_obj$Lower[[resp]][, 1],
+      upper = irf_obj$Upper[[resp]][, 1]
+    )
+  }) %>% bind_rows()
+
+  ggplot(irf_data, aes(x = horizon, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, fill = "#e74c3c") +
+    geom_line(color = "#e74c3c", size = 1) +
+    facet_wrap(~response, scales = "free_y") +
+    labs(title = paste("Response to", shock_name, "Shock"),
+         subtitle = "68% bootstrap confidence bands",
+         x = "Horizon (quarters)", y = "Response")
+}
+
+plot_irf(irf_chol, "Monetary Policy (Rate)")
+```
+
+## The Ordering Problem
+
+**Cholesky identification is sensitive to ordering**. Let's see what happens with a different order:
+
+```{r}
+#| label: ordering-sensitivity
+#| fig-cap: "IRF sensitivity to variable ordering"
+
+# Original ordering: GDP, Inflation, Rate
+Y_order1 <- Y_ts[, c("GDP", "Inflation", "Rate")]
+var_order1 <- VAR(Y_order1, p = 2, type = "const")
+irf_order1 <- irf(var_order1, impulse = "Rate", response = "GDP",
+                   n.ahead = 20, ortho = TRUE, boot = FALSE)
+
+# Alternative ordering: Rate, GDP, Inflation (rate first)
+Y_order2 <- Y_ts[, c("Rate", "GDP", "Inflation")]
+var_order2 <- VAR(Y_order2, p = 2, type = "const")
+irf_order2 <- irf(var_order2, impulse = "Rate", response = "GDP",
+                   n.ahead = 20, ortho = TRUE, boot = FALSE)
+
+# Compare
+compare_df <- data.frame(
+  horizon = 0:20,
+  Order1 = irf_order1$irf$Rate[, "GDP"],
+  Order2 = irf_order2$irf$Rate[, "GDP"]
+) %>%
+  pivot_longer(-horizon, names_to = "ordering", values_to = "response")
+
+ggplot(compare_df, aes(x = horizon, y = response, color = ordering)) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_line(size = 1.2) +
+  scale_color_manual(values = c("Order1" = "#3498db", "Order2" = "#e74c3c"),
+                     labels = c("GDP→Infl→Rate", "Rate→GDP→Infl")) +
+  labs(title = "GDP Response to Rate Shock: Ordering Matters",
+       subtitle = "Same data, different Cholesky orderings",
+       x = "Horizon", y = "GDP Response",
+       color = "Ordering") +
+  theme(legend.position = "top")
+```
+
+::: {.callout-warning}
+## Always Check Robustness
+If your conclusions change substantially with ordering, your identification is fragile. Report results under alternative orderings.
+:::
+
+# Sign Restrictions {.unnumbered}
+
+## The Idea
+
+Instead of exact zero restrictions, impose **inequality constraints** based on economic theory.
+
+For a monetary policy tightening:
+- Interest rate rises (+)
+- Output falls (−)
+- Inflation falls (−)
+
+This doesn't uniquely identify the shock—it defines a **set** of admissible structural models.
+
+## Algorithm
+
+1. Compute any valid $\mathbf{B}_0^{-1}$ (e.g., Cholesky)
+2. Draw a random orthogonal matrix $\mathbf{Q}$
+3. Candidate: $\tilde{\mathbf{B}} = \mathbf{B}_0^{-1} \mathbf{Q}$
+4. Compute IRFs with $\tilde{\mathbf{B}}$
+5. Check if signs match restrictions
+6. If yes: accept. If no: reject and return to step 2.
+
+```{r}
+#| label: sign-restrictions
+#| fig-cap: "Sign-restricted IRFs show a range of admissible models"
+
+# Simplified sign restriction illustration
+# (Full implementation available in svars package)
+
+# For a 3-variable system with monetary policy shock restrictions:
+# - GDP falls (-)
+# - Inflation falls (-)
+# - Rate rises (+)
+
+# Illustrate the concept with Cholesky baseline and perturbations
+K <- 3
+Sigma_est <- summary(var_model)$covres
+B0_inv <- t(chol(Sigma_est))
+
+# Draw multiple rotations and keep those satisfying sign restrictions
+set.seed(42)
+n_draw <- 50
+accepted <- list()
+n_accepted <- 0
+
+for (i in 1:500) {
+  # Random orthogonal matrix
+  X <- matrix(rnorm(K * K), K, K)
+  Q <- qr.Q(qr(X))
+
+  # Candidate impact
+  B_cand <- B0_inv %*% Q
+
+  # Check signs for monetary shock (column 3): GDP(-), Infl(-), Rate(+)
+  if (B_cand[1, 3] < 0 && B_cand[2, 3] < 0 && B_cand[3, 3] > 0) {
+    n_accepted <- n_accepted + 1
+    accepted[[n_accepted]] <- B_cand[, 3]  # Just save impact vector
+    if (n_accepted >= n_draw) break
+  }
+}
+
+cat("Acceptance rate:", round(n_accepted / min(i, 500) * 100, 1), "%\n")
+cat("Accepted draws:", n_accepted, "\n")
+
+# Show range of impact effects
+impact_matrix <- do.call(rbind, accepted)
+colnames(impact_matrix) <- c("GDP", "Inflation", "Rate")
+
+impact_summary <- data.frame(
+  variable = c("GDP", "Inflation", "Rate"),
+  median = apply(impact_matrix, 2, median),
+  lower = apply(impact_matrix, 2, quantile, 0.16),
+  upper = apply(impact_matrix, 2, quantile, 0.84)
+)
+
+ggplot(impact_summary, aes(x = variable, y = median)) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, color = "#9b59b6", size = 1) +
+  geom_point(color = "#9b59b6", size = 4) +
+  labs(title = "Sign-Restricted Impact Effects: Monetary Policy Shock",
+       subtitle = "Median and 68% range across accepted rotations",
+       x = "Variable", y = "Impact Response") +
+  theme(axis.text.x = element_text(size = 12))
+```
+
+::: {.callout-note}
+## Full Implementation
+For complete sign-restricted IRFs across all horizons, use the `svars` package:
+```r
+library(svars)
+id.sign(var_model, restriction_matrix = sign_matrix)
+```
+:::
+
+## Set Identification vs. Point Identification
+
+| Aspect | Point Identification (Cholesky) | Set Identification (Signs) |
+|--------|--------------------------------|---------------------------|
+| Result | Single IRF | Range of IRFs |
+| Assumptions | Exact zeros | Inequality constraints |
+| Robustness | Sensitive to ordering | Theory-guided |
+| Interpretation | "The" effect | Bounds on effect |
+
+# External Instruments (Proxy SVAR) {.unnumbered}
+
+## The Approach
+
+Use an **external instrument** $z_t$ correlated with one structural shock but not others.
+
+**Requirements**:
+- **Relevance**: $E[z_t \varepsilon_{1t}] \neq 0$
+- **Exogeneity**: $E[z_t \varepsilon_{jt}] = 0$ for $j \neq 1$
+
+**Common instruments for monetary policy**:
+- High-frequency surprises around FOMC announcements
+- Narrative identification (Romer & Romer)
+
+## Implementation
+
+```{r}
+#| label: proxy-svar
+#| fig-cap: "Proxy SVAR: External instrument identifies monetary shock"
+
+# Simulate an external instrument
+# True: z is correlated with the monetary shock only
+set.seed(123)
+T_obs <- nrow(Y)
+
+# Generate structural shocks (we'll pretend we don't observe these)
+# For simulation, we know the true Cholesky gives us structural shocks
+Sigma_est <- cov(residuals(var_model))
+B0_inv_true <- t(chol(Sigma_est))
+u_hat <- residuals(var_model)
+eps_hat <- solve(B0_inv_true) %*% t(u_hat)  # "structural" shocks
+
+# External instrument: correlated with monetary shock (row 3) + noise
+phi <- 0.6  # relevance
+z_t <- phi * eps_hat[3, ] + rnorm(T_obs - 2, 0, 1)
+
+# Proxy SVAR estimation
+proxy_svar <- function(var_model, z, policy_pos = 3) {
+  U <- residuals(var_model)
+  K <- ncol(U)
+  T_eff <- nrow(U)
+
+  # Align instrument
+  z_aligned <- z[1:T_eff]
+
+  # First stage: regress policy residual on instrument
+  u_policy <- U[, policy_pos]
+  first_stage <- lm(u_policy ~ z_aligned)
+  u_hat <- fitted(first_stage)
+  F_stat <- summary(first_stage)$fstatistic[1]
+
+  cat("First-stage F-statistic:", round(F_stat, 2), "\n")
+  if (F_stat < 10) warning("Weak instrument! F < 10")
+
+  # Second stage: relative impacts
+  s <- numeric(K)
+  s[policy_pos] <- 1
+  for (j in setdiff(1:K, policy_pos)) {
+    second_stage <- lm(U[, j] ~ u_hat - 1)
+    s[j] <- coef(second_stage)[1]
+  }
+
+  list(impact = s, F_stat = F_stat)
+}
+
+proxy_result <- proxy_svar(var_model, z_t, policy_pos = 3)
+cat("Estimated impact vector:", round(proxy_result$impact, 3), "\n")
+```
+
+::: {.callout-tip}
+## The F-Statistic Rule
+A first-stage F-statistic below 10 indicates a **weak instrument**. Inference becomes unreliable. Always report the F-stat!
+:::
+
+# Forecast Error Variance Decomposition {.unnumbered}
+
+## The Question
+
+At horizon $h$, what fraction of the forecast error variance of variable $i$ is attributable to structural shock $j$?
+
+$$
+\text{FEVD}_{i,j}(h) = \frac{\sum_{s=0}^{h} (\mathbf{e}_i' \boldsymbol{\Phi}_s \mathbf{B}_0^{-1} \mathbf{e}_j)^2}{\sum_{s=0}^{h} \mathbf{e}_i' \boldsymbol{\Phi}_s \boldsymbol{\Sigma}_u \boldsymbol{\Phi}_s' \mathbf{e}_i}
+$$
+
+## Implementation
+
+```{r}
+#| label: fevd
+#| fig-cap: "Forecast error variance decomposition over horizons"
+
+# FEVD from vars package
+fevd_result <- fevd(var_model, n.ahead = 20)
+
+# Plot
+fevd_df <- lapply(names(fevd_result), function(var) {
+  df <- as.data.frame(fevd_result[[var]])
+  df$horizon <- 1:nrow(df)
+  df$response <- var
+  df %>%
+    pivot_longer(-c(horizon, response), names_to = "shock", values_to = "share")
+}) %>% bind_rows()
+
+ggplot(fevd_df, aes(x = horizon, y = share, fill = shock)) +
+  geom_area(alpha = 0.8) +
+  facet_wrap(~response) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Forecast Error Variance Decomposition",
+       subtitle = "Which shocks drive variation at each horizon?",
+       x = "Horizon", y = "Share of Variance",
+       fill = "Shock") +
+  theme(legend.position = "bottom")
+```
+
+## Interpretation
+
+- At short horizons, own shocks typically dominate
+- As horizons extend, other shocks become relatively more important
+- At long horizons: reveals which shocks drive permanent movements
+
+# Historical Decomposition {.unnumbered}
+
+## The Question
+
+What would the path of variable $i$ have been if only shock $j$ had occurred?
+
+$$
+y_{it} = \text{deterministic} + \sum_{j=1}^{K} \underbrace{\sum_{s=0}^{t} \Phi_{ij,s} \cdot \varepsilon_{j,t-s}}_{\text{contribution of shock } j}
+$$
+
+```{r}
+#| label: historical-decomp
+#| fig-cap: "Historical decomposition: contributions of each shock to GDP"
+
+# Simplified historical decomposition illustration
+# Shows the concept without expensive recursive computation
+
+# Get structural shocks (Cholesky-identified)
+B0_inv_est <- t(chol(cov(residuals(var_model))))
+U <- residuals(var_model)
+eps <- solve(B0_inv_est) %*% t(U)  # structural shocks (K x T)
+
+# For illustration, show cumulative contributions over a window
+T_eff <- ncol(eps)
+K <- 3
+
+# Simple approximation: use VAR coefficients at lag 1 only
+A1 <- Acoef(var_model)[[1]]
+
+# Contribution of each shock to GDP (variable 1)
+# At each time t, contribution ≈ impact + A1 * previous contributions
+hd_simple <- matrix(0, T_eff, K)
+
+for (t in 1:T_eff) {
+  # Impact effect: row 1 of B0_inv times structural shocks at time t
+  hd_simple[t, ] <- B0_inv_est[1, ] * eps[, t]
+
+  # Add propagation from recent shocks (simplified)
+  if (t > 1) {
+    hd_simple[t, ] <- hd_simple[t, ] + 0.5 * hd_simple[t-1, ]
+  }
+}
+
+# Plot
+hd_gdp <- data.frame(
+  time = 1:T_eff,
+  `GDP Shock` = hd_simple[, 1],
+  `Inflation Shock` = hd_simple[, 2],
+  `Rate Shock` = hd_simple[, 3],
+  check.names = FALSE
+) %>%
+  pivot_longer(-time, names_to = "shock", values_to = "contribution")
+
+ggplot(hd_gdp, aes(x = time, y = contribution, fill = shock)) +
+  geom_area(alpha = 0.7) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Historical Decomposition of GDP (Simplified)",
+       subtitle = "Contributions of each structural shock to GDP movements",
+       x = "Time", y = "Contribution to GDP",
+       fill = "Shock Source") +
+  theme(legend.position = "bottom")
+```
+
+::: {.callout-note}
+## Full Historical Decomposition
+The `vars` package provides complete historical decomposition via `historical_decomposition()`. The simplified version above illustrates the concept.
+:::
+
+# Model Selection and Diagnostics {.unnumbered}
+
+## Lag Length Selection
+
+```{r}
+#| label: lag-selection
+#| fig-cap: "Information criteria for lag selection"
+
+# Already computed above, let's visualize
+lag_criteria <- data.frame(
+  lags = 1:8,
+  AIC = sapply(1:8, function(p) AIC(VAR(Y_ts, p = p, type = "const"))),
+  BIC = sapply(1:8, function(p) BIC(VAR(Y_ts, p = p, type = "const")))
+)
+
+lag_criteria_long <- lag_criteria %>%
+  pivot_longer(-lags, names_to = "criterion", values_to = "value")
+
+ggplot(lag_criteria_long, aes(x = lags, y = value, color = criterion)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c("AIC" = "#3498db", "BIC" = "#e74c3c")) +
+  labs(title = "Lag Selection Criteria",
+       subtitle = "Lower is better; AIC tends to select more lags than BIC",
+       x = "Number of Lags", y = "Information Criterion") +
+  theme(legend.position = "top")
+```
+
+## Residual Diagnostics
+
+```{r}
+#| label: residual-diagnostics
+
+# Portmanteau test for serial correlation
+serial_test <- serial.test(var_model, lags.pt = 12, type = "PT.asymptotic")
+cat("Portmanteau Test for Serial Correlation:\n")
+cat("Test statistic:", round(serial_test$serial$statistic, 2), "\n")
+cat("p-value:", round(serial_test$serial$p.value, 4), "\n")
+cat("Interpretation:", ifelse(serial_test$serial$p.value > 0.05,
+    "No significant serial correlation (good)",
+    "Serial correlation detected (consider more lags)"), "\n")
+```
+
+## Summary Checklist
+
+Before trusting your VAR results:
+
+1. **Stability**: All eigenvalues inside unit circle?
+2. **Lag length**: Information criteria checked? Residual autocorrelation tests passed?
+3. **Identification**: Assumptions documented? Robustness to alternatives checked?
+4. **Sample size**: Enough observations relative to parameters?
+5. **Structural breaks**: Any reason to believe relationships changed?
+
+# LP vs. VAR: When to Use Which {.unnumbered}
+
+## Equivalence Result
+
+**Theorem (Plagborg-Møller & Wolf, 2021)**: Under correct specification, LP and VAR estimate the same population IRFs.
+
+## Practical Differences
+
+| Aspect | VAR | LP |
+|--------|-----|-----|
+| Specification | Full system | Horizon-by-horizon |
+| Efficiency | More efficient if correct | Less efficient |
+| Robustness | Sensitive to misspecification | Robust |
+| Nonlinearity | Difficult (threshold VAR) | Easy (interactions) |
+| Confidence intervals | Tighter | Wider (but honest) |
+| Output | IRFs, FEVD, historical decomp | IRFs only |
+
+## Recommendations
+
+**Use VAR when**:
+- You want FEVD or historical decomposition
+- System is well-specified and identified
+- Short horizons with good theoretical grounding
+
+**Use LP when**:
+- Single shock identification only
+- State-dependence or nonlinearity matters
+- Robustness to misspecification is priority
+- Panel data
+
+# Summary {.unnumbered}
+
+Key takeaways from this module:
+
+1. **VARs model joint dynamics** without imposing much structure—but this flexibility comes with an identification cost
+
+2. **The identification problem**: Reduced-form tells us correlations; we need assumptions for causation
+
+3. **Cholesky identification** is simple but ordering-sensitive—always check robustness
+
+4. **Sign restrictions** are more robust but set-identified—report the range of admissible models
+
+5. **External instruments** can achieve point identification with plausible exogeneity—report the F-statistic
+
+6. **FEVD and historical decomposition** require structural identification—interpret with caution
+
+7. **LP and VAR are complements**: Use LP for robustness, VAR for richer output
+
+---
+
+*Next: [Module 5: Staggered Difference-in-Differences](05_staggered_did.qmd)*

@@ -1,0 +1,170 @@
+# =============================================================================
+# Empirical Macro Curriculum - .gitignore
+# =============================================================================
+# CRITICAL: This file protects sensitive dissertation data from being pushed
+# to the public repository. DO NOT remove or modify data exclusions.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DATA FILES - NEVER COMMIT (dissertation data must stay private)
+# -----------------------------------------------------------------------------
+*.rds
+*.RDS
+*.rda
+*.RData
+*.csv
+*.CSV
+*.xlsx
+*.xls
+*.dta
+*.sav
+*.mat
+*.pkl
+*.pickle
+*.parquet
+*.feather
+*.h5
+*.hdf5
+
+# Data directories (even if empty, exclude contents)
+data/
+!data/.gitkeep
+external_data/
+
+# Symlinks to real data
+data/master_dataset_expanded.rds
+
+# -----------------------------------------------------------------------------
+# API KEYS AND CREDENTIALS - NEVER COMMIT
+# -----------------------------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+secrets.json
+*_credentials*
+*_secrets*
+.Renviron
+.Rprofile
+
+# -----------------------------------------------------------------------------
+# R ARTIFACTS
+# -----------------------------------------------------------------------------
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj.user/
+*_cache/
+# *_files/ - removed to allow docs/chapters/*_files/ for GitHub Pages figures
+rsconnect/
+
+# R package development
+*.tar.gz
+*.Rcheck/
+
+# -----------------------------------------------------------------------------
+# PYTHON ARTIFACTS
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# -----------------------------------------------------------------------------
+# QUARTO / RENDERING
+# -----------------------------------------------------------------------------
+# Keep rendered HTML (we want to push pre-rendered outputs)
+# But exclude intermediate files
+/.quarto/
+_freeze/
+*_cache/
+*.log
+
+# Site output (we'll configure Quarto to render to docs/ for GitHub Pages)
+# Uncomment if you want to exclude: # _site/
+
+# -----------------------------------------------------------------------------
+# MATLAB
+# -----------------------------------------------------------------------------
+*.asv
+*.m~
+*.autosave
+
+# -----------------------------------------------------------------------------
+# OS FILES
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# -----------------------------------------------------------------------------
+# IDE / EDITOR
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-*
+
+# -----------------------------------------------------------------------------
+# SESSION STATE (Claude Code internal - okay to track for continuity)
+# -----------------------------------------------------------------------------
+# .claude-session-state.md  # Uncomment to exclude if desired
+
+# -----------------------------------------------------------------------------
+# MISC
+# -----------------------------------------------------------------------------
+*.bak
+*.tmp
+*.temp
+*.old
+.sass-cache/
+node_modules/
+
+# -----------------------------------------------------------------------------
+# DEPRECATED STRUCTURE (old phase folders - now using chapters/)
+# -----------------------------------------------------------------------------
+phase1-foundations/
+phase2-dynamic-methods/
+phase3-treatment-effects/
+phase4-bayesian/
+phase5-structural/
+phase6-causal-ml/
+utils/
+
+**/*.quarto_ipynb

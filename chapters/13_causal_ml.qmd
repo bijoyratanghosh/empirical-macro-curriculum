@@ -1,0 +1,842 @@
+---
+title: "Causal Machine Learning"
+subtitle: "Heterogeneous Treatment Effects, Causal Forests, and Double ML"
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+# Note: grf package required for causal forests
+# install.packages("grf")
+set.seed(42)
+```
+
+```python
+# Python setup (run in your Python environment)
+import numpy as np
+import pandas as pd
+np.random.seed(42)
+```
+
+# From Prediction to Causation {.unnumbered}
+
+Machine learning excels at **prediction**: minimizing $\mathbb{E}[(Y - \hat{f}(X))^2]$. But economists care about **causation**: what happens to $Y$ if we *intervene* on $X$?
+
+| Goal | Question | Method |
+|------|----------|--------|
+| **Prediction** | What is $\hat{y}$ given $x$? | Random forest, neural net, boosting |
+| **Causation** | What happens to $y$ if we change $x$? | Experiments, IV, DiD, RDD |
+
+::: {.callout-note}
+## The Causal ML Revolution
+Recent methods—causal forests, double ML, meta-learners—combine ML's flexibility for high-dimensional data with causal inference's focus on identification [@athey2019]. The key insight: use ML for **nuisance parameters** (propensity scores, outcome models) while preserving valid **causal inference**. Key methodological foundations include causal forests [@wager2018] and double/debiased ML [@chernozhukov2018].
+:::
+
+## Key Papers
+
+| Paper | Contribution |
+|-------|--------------|
+| **Athey & Imbens (2016)** | Recursive partitioning for heterogeneous causal effects |
+| **Wager & Athey (2018)** | Causal forests with valid asymptotic inference |
+| **Chernozhukov et al. (2018)** | Double/Debiased ML for high-dimensional controls |
+| **Künzel et al. (2019)** | Meta-learners (X-learner) for CATE |
+| **Athey & Wager (2021)** | Policy learning with observational data |
+
+# The Potential Outcomes Framework {.unnumbered}
+
+## Setup
+
+For each unit $i$:
+
+- **Treatment**: $W_i \in \{0, 1\}$
+- **Potential outcomes**: $Y_i(0), Y_i(1)$ — what would happen under control/treatment
+- **Observed outcome**: $Y_i = W_i \cdot Y_i(1) + (1 - W_i) \cdot Y_i(0)$
+- **Covariates**: $X_i$ (pre-treatment characteristics)
+
+## Treatment Effects Taxonomy
+
+| Estimand | Definition | Interpretation |
+|----------|------------|----------------|
+| **ITE** | $\tau_i = Y_i(1) - Y_i(0)$ | Individual effect (unobservable) |
+| **CATE** | $\tau(x) = \mathbb{E}[Y(1) - Y(0) \mid X = x]$ | Conditional average effect |
+| **ATE** | $\mathbb{E}[\tau_i]$ | Average treatment effect |
+| **ATT** | $\mathbb{E}[\tau_i \mid W_i = 1]$ | Effect on the treated |
+
+## The Fundamental Problem of Causal Inference
+
+We observe either $Y_i(1)$ OR $Y_i(0)$, never both. The individual treatment effect $\tau_i$ is **fundamentally unidentifiable**.
+
+**Solution**: Under **unconfoundedness** (selection on observables):
+$$
+(Y_i(0), Y_i(1)) \perp\!\!\!\perp W_i \mid X_i
+$$
+
+Plus **overlap** (positivity): $0 < P(W_i = 1 \mid X_i = x) < 1$ for all $x$.
+
+# Heterogeneous Treatment Effects {.unnumbered}
+
+## Why Heterogeneity Matters
+
+The ATE $= 2$ could mask:
+
+- Subgroup A: $\tau = 5$ (strong benefit)
+- Subgroup B: $\tau = -1$ (harm)
+
+Understanding heterogeneity enables:
+
+1. **Targeting**: Treat those who benefit most
+2. **Mechanism identification**: What drives variation?
+3. **Policy optimization**: Maximize welfare under constraints
+
+```{r}
+#| label: heterogeneity-demo
+#| fig-cap: "Treatment effect heterogeneity: τ(x) = 2 + 1.5X₁"
+
+# Simulate heterogeneous effects
+n <- 1000
+X1 <- rnorm(n)
+X2 <- rnorm(n)
+
+# Treatment effect depends on X1
+tau_true <- 2 + 1.5 * X1
+
+# Treatment assignment (randomized)
+W <- rbinom(n, 1, 0.5)
+
+# Potential outcomes
+Y0 <- 1 + 0.5 * X1 + 0.3 * X2 + rnorm(n)
+Y1 <- Y0 + tau_true
+Y <- W * Y1 + (1 - W) * Y0
+
+# Create data frame
+df <- tibble(Y = Y, W = W, X1 = X1, X2 = X2, tau_true = tau_true)
+
+# Show heterogeneity
+ggplot(df, aes(x = X1, y = tau_true)) +
+  geom_point(alpha = 0.3, color = "#3498db") +
+  geom_smooth(method = "lm", color = "#e74c3c", se = FALSE, linewidth = 1.2) +
+  geom_hline(yintercept = mean(tau_true), linetype = "dashed", color = "#2ecc71") +
+  annotate("text", x = 2, y = mean(tau_true) + 0.3, label = "ATE", color = "#2ecc71") +
+  labs(title = "True Treatment Effect Varies with X₁",
+       subtitle = "ATE masks substantial heterogeneity",
+       x = expression(X[1]), y = "True Treatment Effect τ(x)") +
+  theme_minimal()
+```
+
+## Traditional Approaches and Their Limitations
+
+**Subgroup analysis**: Pre-specify groups, estimate effects within each.
+
+- Problem: Many possible subgroups → multiple testing
+- Problem: Boundaries are arbitrary
+
+**Interaction terms**: $Y = \alpha + \tau W + \gamma W \cdot X + \beta X + \varepsilon$
+
+- Problem: Must specify functional form
+- Problem: Doesn't scale to many $X$
+
+**Causal ML**: Learn $\tau(x)$ flexibly from data with valid inference.
+
+# Causal Forests {.unnumbered}
+
+## The Key Idea (Wager & Athey 2018)
+
+Adapt random forests from predicting $\mathbb{E}[Y|X]$ to predicting $\tau(x) = \mathbb{E}[Y(1) - Y(0)|X=x]$.
+
+**Key innovations**:
+
+1. **Honest splitting**: Separate samples for tree structure vs. leaf estimation
+2. **Heterogeneity-maximizing splits**: Split to maximize treatment effect variation
+3. **Valid inference**: Asymptotic normality of estimates
+
+## Algorithm
+
+For each tree $b = 1, \ldots, B$:
+
+1. **Subsample** data into tree-building ($\mathcal{I}_1$) and estimation ($\mathcal{I}_2$) sets
+2. **Build tree** on $\mathcal{I}_1$: at each node, find split maximizing heterogeneity
+3. **Estimate leaf effects** using $\mathcal{I}_2$ only (honesty)
+4. **Aggregate**: $\hat{\tau}(x) = \frac{1}{B} \sum_b \hat{\tau}_b(x)$
+
+## R Implementation with `grf`
+
+```{r}
+#| label: causal-forest
+#| fig-cap: "Causal forest recovers heterogeneous treatment effects"
+#| eval: true
+
+library(grf)
+
+# Prepare data
+X <- cbind(X1, X2)
+
+# Fit causal forest
+cf <- causal_forest(
+  X = X,
+  Y = Y,
+  W = W,
+  num.trees = 2000,
+  honesty = TRUE,           # honest splitting (default)
+  tune.parameters = "all"   # automatic hyperparameter tuning
+)
+
+# Predict treatment effects
+tau_hat <- predict(cf)$predictions
+
+# Compare to truth
+comparison_df <- tibble(
+  true = tau_true,
+  estimated = tau_hat,
+  X1 = X1
+)
+
+# Scatter: estimated vs true
+p1 <- ggplot(comparison_df, aes(x = true, y = estimated)) +
+  geom_point(alpha = 0.3, color = "#3498db") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#e74c3c") +
+  labs(title = "Estimated vs True CATE",
+       x = "True τ(x)", y = "Estimated τ̂(x)") +
+  theme_minimal()
+
+# By X1
+p2 <- ggplot(comparison_df, aes(x = X1)) +
+  geom_point(aes(y = true), alpha = 0.2, color = "#2ecc71") +
+  geom_point(aes(y = estimated), alpha = 0.2, color = "#3498db") +
+  geom_smooth(aes(y = estimated), method = "loess", color = "#e74c3c", se = FALSE) +
+  labs(title = "CATE by X₁",
+       subtitle = "Green = true, Blue = estimated",
+       x = expression(X[1]), y = "Treatment Effect") +
+  theme_minimal()
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+## Key `grf` Functions
+
+```r
+library(grf)
+
+# Fit causal forest
+cf <- causal_forest(X, Y, W, num.trees = 2000)
+
+# Point predictions
+tau_hat <- predict(cf)$predictions
+
+# Predictions with variance (for CIs)
+tau_ci <- predict(cf, estimate.variance = TRUE)
+lower <- tau_ci$predictions - 1.96 * sqrt(tau_ci$variance.estimates)
+upper <- tau_ci$predictions + 1.96 * sqrt(tau_ci$variance.estimates)
+
+# Average treatment effect with SE
+ate <- average_treatment_effect(cf, target.sample = "all")
+cat("ATE:", ate[1], "SE:", ate[2], "\n")
+
+# ATT
+att <- average_treatment_effect(cf, target.sample = "treated")
+
+# Variable importance: which X drive heterogeneity?
+vi <- variable_importance(cf)
+
+# Best linear projection: linear approximation of τ(x)
+blp <- best_linear_projection(cf, X)
+
+# Calibration test: is there heterogeneity?
+test_calibration(cf)
+```
+
+## Variable Importance
+
+Which covariates drive treatment effect heterogeneity?
+
+```{r}
+#| label: variable-importance
+#| fig-cap: "Variable importance identifies X₁ as driver of heterogeneity"
+#| eval: true
+
+# Variable importance
+vi <- variable_importance(cf)
+vi_df <- tibble(
+  variable = c("X1", "X2"),
+  importance = vi
+)
+
+ggplot(vi_df, aes(x = reorder(variable, importance), y = importance)) +
+  geom_bar(stat = "identity", fill = "#3498db") +
+  coord_flip() +
+  labs(title = "Variable Importance for Treatment Heterogeneity",
+       subtitle = "X₁ drives heterogeneity (as designed)",
+       x = NULL, y = "Importance") +
+  theme_minimal()
+```
+
+## Observational Data: Pre-Estimated Nuisance Functions
+
+For observational studies, pre-fit propensity and outcome models:
+
+```r
+# Pre-fit nuisance models (recommended for observational data)
+W.hat <- predict(regression_forest(X, W))$predictions  # propensity
+Y.hat <- predict(regression_forest(X, Y))$predictions  # outcome
+
+# Causal forest with pre-estimated nuisance
+cf_obs <- causal_forest(X, Y, W, W.hat = W.hat, Y.hat = Y.hat)
+```
+
+# Double/Debiased Machine Learning {.unnumbered}
+
+## The Problem
+
+When using ML for nuisance parameters (propensity score, outcome model), regularization introduces bias that **invalidates standard inference**.
+
+**Example**: LASSO shrinks coefficients → biased treatment effect → invalid t-statistics.
+
+## The Solution (Chernozhukov et al. 2018)
+
+Two key ingredients:
+
+1. **Cross-fitting**: Train ML on fold $-k$, predict on fold $k$
+2. **Neyman orthogonality**: Use score function robust to nuisance estimation error
+
+## Partially Linear Model
+
+$$
+Y = \theta D + g(X) + U, \quad \mathbb{E}[U|X,D] = 0
+$$
+$$
+D = m(X) + V, \quad \mathbb{E}[V|X] = 0
+$$
+
+**Target**: $\theta$ (treatment effect)
+
+**Nuisance**: $g(X)$ (outcome confounding), $m(X)$ (propensity/treatment model)
+
+## The Algorithm
+
+1. Split data into $K$ folds (typically $K = 5$)
+2. For each fold $k$:
+   - Train $\hat{g}_{-k}(X)$ and $\hat{m}_{-k}(X)$ on all other folds
+   - Compute residuals on fold $k$:
+     - $\tilde{Y}_i = Y_i - \hat{g}_{-k}(X_i)$
+     - $\tilde{D}_i = D_i - \hat{m}_{-k}(X_i)$
+3. Estimate: $\hat{\theta} = \frac{\sum_i \tilde{D}_i \tilde{Y}_i}{\sum_i \tilde{D}_i^2}$
+4. Standard error: standard OLS formula on residualized data
+
+## Why It Works: Orthogonality
+
+The **orthogonal moment condition**:
+$$
+\psi(W; \theta, \eta) = (Y - g(X) - \theta D)(D - m(X))
+$$
+
+has the property that small errors in $\hat{g}, \hat{m}$ don't bias $\hat{\theta}$:
+$$
+\frac{\partial}{\partial \eta} \mathbb{E}[\psi(W; \theta_0, \eta)] \bigg|_{\eta = \eta_0} = 0
+$$
+
+## Python Implementation with `doubleml`
+
+```python
+# Double ML estimation in Python
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import cross_val_predict
+import warnings
+warnings.filterwarnings('ignore')
+
+# Simulate data
+n = 2000
+p = 10
+X = np.random.randn(n, p)
+theta_true = 0.5  # true treatment effect
+D = X[:, 0] + 0.5 * X[:, 1] + np.random.randn(n)  # treatment depends on X
+Y = theta_true * D + X[:, 0] + X[:, 1] + np.random.randn(n)  # outcome
+
+# Manual Double ML
+def double_ml_plr(Y, D, X, K=5):
+    """
+    Double ML for Partially Linear Regression
+    Y = theta * D + g(X) + U
+    D = m(X) + V
+    """
+    n = len(Y)
+
+    # Cross-fitted predictions
+    g_hat = cross_val_predict(
+        RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42),
+        X, Y, cv=K
+    )
+    m_hat = cross_val_predict(
+        RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42),
+        X, D, cv=K
+    )
+
+    # Residualize
+    Y_tilde = Y - g_hat
+    D_tilde = D - m_hat
+
+    # Estimate theta
+    theta_hat = np.sum(D_tilde * Y_tilde) / np.sum(D_tilde ** 2)
+
+    # Standard error
+    residuals = Y_tilde - theta_hat * D_tilde
+    se_hat = np.sqrt(np.sum(residuals ** 2 * D_tilde ** 2) / (np.sum(D_tilde ** 2) ** 2))
+
+    return {
+        'estimate': theta_hat,
+        'se': se_hat,
+        'ci_lower': theta_hat - 1.96 * se_hat,
+        'ci_upper': theta_hat + 1.96 * se_hat
+    }
+
+# Run Double ML
+result = double_ml_plr(Y, D, X)
+
+print(f"True θ: {theta_true}")
+print(f"Double ML estimate: {result['estimate']:.4f}")
+print(f"Standard error: {result['se']:.4f}")
+print(f"95% CI: [{result['ci_lower']:.4f}, {result['ci_upper']:.4f}]")
+```
+
+## Using the `DoubleML` Package
+
+```python
+from doubleml import DoubleMLPLR, DoubleMLData
+from sklearn.ensemble import RandomForestRegressor
+
+# Create data object
+df = pd.DataFrame(X, columns=[f'X{i}' for i in range(p)])
+df['Y'] = Y
+df['D'] = D
+
+dml_data = DoubleMLData(
+    df, y_col='Y', d_cols='D',
+    x_cols=[f'X{i}' for i in range(p)]
+)
+
+# Specify learners
+ml_l = RandomForestRegressor(n_estimators=500, max_depth=5)
+ml_m = RandomForestRegressor(n_estimators=500, max_depth=5)
+
+# Fit
+dml_plr = DoubleMLPLR(dml_data, ml_l, ml_m, n_folds=5)
+dml_plr.fit()
+print(dml_plr.summary)
+```
+
+## R Implementation
+
+```{r}
+#| label: double-ml-r
+#| fig-cap: "Double ML estimation in R"
+#| eval: true
+
+# Manual Double ML for ATE (binary treatment)
+double_ml_ate <- function(Y, W, X, K = 5) {
+  n <- length(Y)
+  folds <- sample(rep(1:K, length.out = n))
+
+  psi <- numeric(n)
+
+  for (k in 1:K) {
+    train_idx <- folds != k
+    test_idx <- folds == k
+
+    # Train outcome models (T-learner style)
+    rf_1 <- grf::regression_forest(X[train_idx & W == 1, , drop = FALSE],
+                                    Y[train_idx & W == 1])
+    rf_0 <- grf::regression_forest(X[train_idx & W == 0, , drop = FALSE],
+                                    Y[train_idx & W == 0])
+
+    # Train propensity model
+    rf_e <- grf::regression_forest(X[train_idx, , drop = FALSE],
+                                    W[train_idx])
+
+    # Predict on test fold
+    mu1_hat <- predict(rf_1, X[test_idx, , drop = FALSE])$predictions
+    mu0_hat <- predict(rf_0, X[test_idx, , drop = FALSE])$predictions
+    e_hat <- predict(rf_e, X[test_idx, , drop = FALSE])$predictions
+    e_hat <- pmax(pmin(e_hat, 0.99), 0.01)  # clip propensity
+
+    # AIPW pseudo-outcome (doubly robust)
+    Y_test <- Y[test_idx]
+    W_test <- W[test_idx]
+
+    psi[test_idx] <- W_test * (Y_test - mu1_hat) / e_hat -
+                     (1 - W_test) * (Y_test - mu0_hat) / (1 - e_hat) +
+                     mu1_hat - mu0_hat
+  }
+
+  # ATE and SE
+  tau_hat <- mean(psi)
+  se_hat <- sd(psi) / sqrt(n)
+
+  list(
+    estimate = tau_hat,
+    se = se_hat,
+    ci_lower = tau_hat - 1.96 * se_hat,
+    ci_upper = tau_hat + 1.96 * se_hat
+  )
+}
+
+# Apply
+dml_result <- double_ml_ate(Y, W, as.matrix(cbind(X1, X2)))
+true_ate <- mean(tau_true)
+
+cat("Double ML ATE:", round(dml_result$estimate, 3), "\n")
+cat("SE:", round(dml_result$se, 3), "\n")
+cat("True ATE:", round(true_ate, 3), "\n")
+cat("95% CI: [", round(dml_result$ci_lower, 3), ",",
+    round(dml_result$ci_upper, 3), "]\n")
+```
+
+# Meta-Learners {.unnumbered}
+
+## Overview
+
+Meta-learners are strategies for combining base ML models to estimate CATE.
+
+## T-Learner (Two Models)
+
+Train **separate** models for treatment and control:
+
+$$
+\hat{\tau}(x) = \hat{\mu}_1(x) - \hat{\mu}_0(x)
+$$
+
+```python
+# T-Learner implementation
+from sklearn.ensemble import RandomForestRegressor
+
+# Binary treatment simulation
+n = 1000
+X_sim = np.random.randn(n, 5)
+W_sim = np.random.binomial(1, 0.5, n)
+tau_sim = X_sim[:, 0] + 0.5 * X_sim[:, 1]
+Y_sim = tau_sim * W_sim + X_sim[:, 0] + np.random.randn(n)
+
+# T-Learner: separate models for treatment and control
+model_0 = RandomForestRegressor(n_estimators=100, random_state=42)
+model_1 = RandomForestRegressor(n_estimators=100, random_state=42)
+
+model_0.fit(X_sim[W_sim == 0], Y_sim[W_sim == 0])
+model_1.fit(X_sim[W_sim == 1], Y_sim[W_sim == 1])
+
+tau_t = model_1.predict(X_sim) - model_0.predict(X_sim)
+
+print(f"T-Learner correlation with true τ: {np.corrcoef(tau_sim, tau_t)[0,1]:.3f}")
+```
+
+**Pros**: Simple, no propensity needed
+
+**Cons**: High variance, especially with imbalanced treatment
+
+## S-Learner (Single Model)
+
+Single model with treatment as feature:
+
+$$
+\hat{\mu}(x, w) \rightarrow \hat{\tau}(x) = \hat{\mu}(x, 1) - \hat{\mu}(x, 0)
+$$
+
+```python
+# S-Learner: single model with treatment as feature
+X_aug = np.column_stack([X_sim, W_sim])
+model_s = RandomForestRegressor(n_estimators=100, random_state=42)
+model_s.fit(X_aug, Y_sim)
+
+# Predict under treatment and control
+tau_s = (model_s.predict(np.column_stack([X_sim, np.ones(n)])) -
+         model_s.predict(np.column_stack([X_sim, np.zeros(n)])))
+
+print(f"S-Learner correlation with true τ: {np.corrcoef(tau_sim, tau_s)[0,1]:.3f}")
+```
+
+**Pros**: Simple, regularization shared
+
+**Cons**: Treatment effect can be shrunk to zero
+
+## X-Learner (Künzel et al. 2019)
+
+Best for **imbalanced treatment** (few treated or few controls):
+
+1. Fit $\hat{\mu}_0, \hat{\mu}_1$ (T-learner)
+2. Impute treatment effects:
+   - Treated: $\tilde{D}_1 = Y_1 - \hat{\mu}_0(X_1)$
+   - Control: $\tilde{D}_0 = \hat{\mu}_1(X_0) - Y_0$
+3. Fit models: $\hat{\tau}_0(x), \hat{\tau}_1(x)$
+4. Combine: $\hat{\tau}(x) = e(x) \hat{\tau}_0(x) + (1-e(x)) \hat{\tau}_1(x)$
+
+## Comparison
+
+| Learner | Best When | Weakness |
+|---------|-----------|----------|
+| **T-Learner** | Balanced, large samples | High variance |
+| **S-Learner** | Small effects, regularization needed | Shrinks effects |
+| **X-Learner** | Imbalanced treatment | Complex, needs propensity |
+
+# Group Average Treatment Effects (GATES) {.unnumbered}
+
+## Evaluating Heterogeneity
+
+GATES groups units by predicted CATE and estimates average effects within each group:
+
+```{r}
+#| label: gates
+#| fig-cap: "GATES: Average effects by predicted CATE quartile"
+#| eval: true
+
+# GATES analysis
+tau_hat <- predict(cf)$predictions
+
+# Create quartiles
+df <- df %>%
+  mutate(
+    tau_hat = tau_hat,
+    quartile = cut(tau_hat,
+                   breaks = quantile(tau_hat, c(0, 0.25, 0.5, 0.75, 1)),
+                   labels = c("Q1 (lowest)", "Q2", "Q3", "Q4 (highest)"),
+                   include.lowest = TRUE)
+  )
+
+# Compute GATES
+gates <- df %>%
+  group_by(quartile) %>%
+  summarise(
+    mean_tau_true = mean(tau_true),
+    mean_tau_hat = mean(tau_hat),
+    n = n(),
+    .groups = "drop"
+  )
+
+# Plot
+ggplot(gates, aes(x = quartile)) +
+  geom_bar(aes(y = mean_tau_true, fill = "True"), stat = "identity",
+           position = position_dodge(width = 0.8), width = 0.35) +
+  geom_bar(aes(y = mean_tau_hat, fill = "Estimated"), stat = "identity",
+           position = position_dodge(width = 0.8), width = 0.35) +
+  scale_fill_manual(values = c("True" = "#2ecc71", "Estimated" = "#3498db")) +
+  labs(title = "Group Average Treatment Effects (GATES)",
+       subtitle = "Causal forest correctly ranks effect heterogeneity",
+       x = "Quartile of Predicted CATE", y = "Average Treatment Effect") +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.title = element_blank())
+```
+
+## Best Linear Predictor (BLP)
+
+Which covariates **explain** heterogeneity?
+
+```{r}
+#| label: blp
+#| fig-cap: "Best linear predictor identifies X₁ as heterogeneity driver"
+#| eval: true
+
+# Best linear projection
+blp <- best_linear_projection(cf, X)
+print(blp)
+
+# Visualize
+blp_df <- tibble(
+  variable = c("Intercept", "X1", "X2"),
+  estimate = blp[, 1],
+  se = blp[, 2]
+)
+
+ggplot(blp_df, aes(x = variable, y = estimate)) +
+  geom_point(size = 3, color = "#3498db") +
+  geom_errorbar(aes(ymin = estimate - 1.96 * se, ymax = estimate + 1.96 * se),
+                width = 0.2, color = "#3498db") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Best Linear Predictor of CATE",
+       subtitle = "X₁ significantly predicts heterogeneity (coefficient ≈ 1.5)",
+       x = NULL, y = "Coefficient") +
+  theme_minimal()
+```
+
+# EconML: Microsoft's Causal ML Toolkit {.unnumbered}
+
+## Overview
+
+EconML provides a **unified API** for heterogeneous treatment effect estimation in Python.
+
+## Key Estimators
+
+| Estimator | Description |
+|-----------|-------------|
+| `LinearDML` | DML with linear final stage |
+| `CausalForestDML` | Causal forest with DML |
+| `ForestDRLearner` | Doubly robust forest |
+| `OrthoIV` | Orthogonal IV learner |
+| `DynamicDML` | Panel data |
+
+## Python Implementation
+
+```python
+# EconML example
+from econml.dml import LinearDML, CausalForestDML
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+
+# Setup
+X_hetero = X_sim[:, :3]  # features for heterogeneity
+W_confound = X_sim[:, 3:]  # confounders
+
+# LinearDML
+est_linear = LinearDML(
+    model_y=RandomForestRegressor(n_estimators=100),
+    model_t=RandomForestClassifier(n_estimators=100),
+    cv=5
+)
+est_linear.fit(Y_sim, W_sim, X=X_hetero, W=W_confound)
+
+# Effects
+tau_linear = est_linear.effect(X_hetero)
+
+# Inference
+tau_lower, tau_upper = est_linear.effect_interval(X_hetero, alpha=0.05)
+
+# Summary
+print(est_linear.summary())
+```
+
+## Unified API Pattern
+
+All EconML estimators follow:
+
+```python
+est.fit(Y, T, X=X, W=W)           # fit (Y=outcome, T=treatment, X=hetero, W=confound)
+est.effect(X_test)                 # point estimates
+est.effect_interval(X_test)        # confidence intervals
+est.summary()                      # inference summary
+```
+
+# Applications in Macroeconomics {.unnumbered}
+
+## Heterogeneous Policy Effects
+
+**Question**: How do monetary policy effects vary across firms/regions/time?
+
+**Approach**:
+
+1. Identify policy shocks (high-frequency, narrative)
+2. Estimate heterogeneous effects using causal forests
+3. Characterize which observables predict sensitivity
+
+## Example: Cross-Country Monetary Transmission
+
+```r
+# Do bank holdings predict constrained monetary response?
+cf_policy <- causal_forest(
+  X = cbind(bank_holdings, cbi_index, debt_gdp, trade_openness),
+  Y = delta_inflation,
+  W = tightening_dummy
+)
+
+# Which characteristics drive heterogeneity?
+variable_importance(cf_policy)
+
+# Linear approximation
+best_linear_projection(cf_policy,
+                       cbind(bank_holdings, cbi_index, debt_gdp))
+```
+
+## Fiscal Multiplier Heterogeneity
+
+Do fiscal multipliers vary by:
+
+- Slack (output gap)?
+- Monetary policy stance (ZLB)?
+- Debt levels?
+
+Causal forests can flexibly estimate:
+$$
+\text{Multiplier}(x) = \mathbb{E}[\Delta Y \mid \text{Fiscal shock}, X = x]
+$$
+
+# Practical Considerations {.unnumbered}
+
+## Sample Size Requirements
+
+| Method | Minimum N | Recommended N |
+|--------|-----------|---------------|
+| ATE (Double ML) | 200 | 500+ |
+| CATE (Causal Forest) | 500 | 2000+ |
+| GATES | 1000 | 3000+ |
+| Variable Importance | 2000 | 5000+ |
+
+## Diagnostics
+
+### Overlap Check
+
+```r
+# Propensity score distribution
+e_hat <- cf$W.hat
+hist(e_hat, breaks = 50, main = "Propensity Scores")
+abline(v = c(0.1, 0.9), col = "red", lty = 2)
+
+# Extreme values
+cat("Extreme propensity:", mean(e_hat < 0.1 | e_hat > 0.9) * 100, "%\n")
+```
+
+### Calibration Test
+
+```r
+# Is there actually heterogeneity?
+test_calibration(cf)
+# Look for significant "differential.forest.prediction"
+```
+
+### AUTOC (Targeting Quality)
+
+```r
+# Area Under the TOC Curve
+rate <- rank_average_treatment_effect(cf, X[, 1])
+print(rate)  # CI should exclude 0
+```
+
+## Common Pitfalls
+
+1. **Causal ML doesn't solve identification**: Still need unconfoundedness
+2. **Overfitting CATE**: Use honest forests, cross-validation
+3. **Noise as heterogeneity**: Run calibration tests
+4. **Overlap violations**: Check propensity scores, trim extremes
+5. **Small samples**: CATE unreliable with N < 500
+
+# Summary {.unnumbered}
+
+| Method | Purpose | Package |
+|--------|---------|---------|
+| **Causal Forest** | Heterogeneous treatment effects | `grf` (R) |
+| **Double ML** | ATE with high-dimensional controls | `DoubleML` (Python/R) |
+| **EconML** | Unified CATE estimation | `econml` (Python) |
+| **Meta-Learners** | T/S/X strategies for CATE | Various |
+
+::: {.callout-tip}
+## For Macro Applications
+
+1. **Sample sizes matter**: Cross-country panels may be too small for CATE
+2. **Identification first**: Causal ML requires the same assumptions as traditional methods
+3. **Focus on BLP and GATES**: Which characteristics predict heterogeneity?
+4. **Aggregation concerns**: Individual effects may aggregate differently at macro level
+:::
+
+# Key References {.unnumbered}
+
+## Foundational
+
+- **Athey & Imbens (2016)** "Recursive Partitioning for Heterogeneous Causal Effects" PNAS
+- **Wager & Athey (2018)** "Estimation and Inference of Heterogeneous Treatment Effects using Random Forests" JASA
+- **Chernozhukov et al. (2018)** "Double/Debiased Machine Learning" Econometrics Journal
+
+## Extensions
+
+- **Künzel et al. (2019)** "Metalearners for Heterogeneous Treatment Effects" PNAS
+- **Athey & Wager (2021)** "Policy Learning with Observational Data" Econometrica
+- **Kennedy (2022)** "Optimal Doubly Robust Estimation of Heterogeneous Causal Effects"
+
+## Resources
+
+- **Causal ML Book**: https://causalml-book.org/
+- **ML for Economists**: https://github.com/ml4econ/lecture-notes-2025
+- **grf Documentation**: https://grf-labs.github.io/grf/
+- **EconML**: https://github.com/py-why/EconML
+- **DoubleML**: https://github.com/DoubleML/doubleml-for-py

@@ -1,0 +1,87 @@
+project:
+  type: book
+  output-dir: docs  # GitHub Pages serves from docs/ folder
+
+book:
+  title: "Mastering Empirical Macroeconometrics"
+  subtitle: "A Practitioner's Guide from Panel Data to Structural Models"
+  author: "Bijoy Ratan Ghosh"
+  date: last-modified
+  date-format: "MMMM YYYY"
+
+  repo-url: https://github.com/bijoyratanghosh/empirical-macro-curriculum
+  repo-actions: [edit, issue]
+
+  sidebar:
+    style: docked
+    search: true
+
+  page-footer:
+    left: |
+      Mastering Empirical Macroeconometrics by Bijoy Ratan Ghosh
+    right: |
+      Built with [Quarto](https://quarto.org/)
+
+  chapters:
+    - index.qmd
+    - part: "Phase 1: Foundations"
+      chapters:
+        - chapters/01_panel_econometrics.qmd
+        - chapters/02_identification.qmd
+    - part: "Phase 2: Dynamic Methods"
+      chapters:
+        - chapters/03_local_projections.qmd
+        - chapters/04_var_svar.qmd
+    - part: "Phase 3: Treatment Effects"
+      chapters:
+        - chapters/05_staggered_did.qmd
+        - chapters/06_synthetic_control.qmd
+    - part: "Phase 4: Bayesian Econometrics"
+      chapters:
+        - chapters/07_bayesian_foundations.qmd
+        - chapters/08_bayesian_var.qmd
+        - chapters/09_bayesian_panel.qmd
+    - part: "Phase 5: Structural Macro"
+      chapters:
+        - chapters/10_dsge_foundations.qmd
+        - chapters/11_dsge_estimation.qmd
+    - part: "Phase 6: Causal Machine Learning"
+      chapters:
+        - chapters/12_regularization.qmd
+        - chapters/13_causal_ml.qmd
+    - references.qmd
+
+bibliography: references.bib
+
+format:
+  html:
+    theme:
+      light:
+        - cosmo
+        - styles/custom.scss
+    mainfont: "Helvetica Neue, Helvetica, Arial, sans-serif"
+    fontsize: 1rem
+    linestretch: 1.5
+    code-fold: show
+    code-tools: true
+    code-copy: true
+    code-line-numbers: true
+    toc: true
+    toc-depth: 3
+    number-sections: false
+    highlight-style: github
+    link-external-icon: false
+    link-external-newwindow: true
+
+execute:
+  freeze: auto  # Re-render only when source changes
+  warning: false
+  message: false
+
+# Language engines
+knitr:
+  opts_chunk:
+    fig.width: 10
+    fig.height: 6
+    fig.align: center
+    cache: true
