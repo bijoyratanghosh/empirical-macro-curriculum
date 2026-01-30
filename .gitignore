@@ -142,9 +142,10 @@ desktop.ini
 *.sublime-*
 
 # -----------------------------------------------------------------------------
-# SESSION STATE (Claude Code internal - okay to track for continuity)
+# CLAUDE CODE FILES - EXCLUDE FROM PUBLIC REPO
 # -----------------------------------------------------------------------------
-# .claude-session-state.md  # Uncomment to exclude if desired
+.claude/
+.claude-session-state.md
 
 # -----------------------------------------------------------------------------
 # MISC
